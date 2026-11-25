@@ -18,7 +18,7 @@ import { generateSampleReports } from './sampleData';
 const STORAGE_KEYS = {
   uploadedReports: 'rcc_uploaded_reports_v1',
   tasks: 'rcc_tasks_v1',
-  theme: 'rcc_theme_v2',
+  theme: 'rcc_theme_v4',
   signOffs: 'rcc_signoffs_v1',
   policy: 'rcc_policy_v1',
   audit: 'rcc_audit_v1',
@@ -133,9 +133,15 @@ async function apiRequest(path, options = {}) {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
     ...options,
   });
+  const contentType = res.headers.get('content-type') || '';
   if (!res.ok) {
-    const errBody = await res.json().catch(() => ({}));
+    const errBody = contentType.includes('application/json')
+      ? await res.json().catch(() => ({}))
+      : {};
     throw new Error(errBody.error || `API request failed (${res.status})`);
+  }
+  if (!contentType.includes('application/json')) {
+    throw new Error('Backend API unavailable (non-JSON response)');
   }
   return res.json();
 }
@@ -210,21 +216,32 @@ function isDefaultPolicy(policy) {
 }
 
 /**
- * Generates deterministic smooth SVG cubic-bezier curve path from numeric values.
+ * Generates deterministic smooth SVG cubic-bezier curve path from numeric values,
+ * auto-scaling the Y-axis to make small variations visually clear.
  */
-function buildSmoothSvgPath(values, width = 260, height = 52) {
-  const pts = values.map((v, idx) => {
-    const x = values.length === 1 ? width / 2 : (idx / (values.length - 1)) * width;
-    const clamped = Math.max(4, Math.min(96, v));
-    const y = height - (clamped / 100) * (height - 10) - 5;
+function buildSmoothSvgPath(values, width = 260, height = 54) {
+  const numeric = values.map((v) => (Number.isFinite(Number(v)) ? Number(v) : 0));
+  if (numeric.length === 0) return { line: '', area: '', lastPt: null };
+
+  const minVal = Math.min(...numeric);
+  const maxVal = Math.max(...numeric);
+  const span = Math.max(10, maxVal - minVal);
+  const floor = Math.max(0, minVal - span * 0.22);
+  const ceil = maxVal + span * 0.22;
+  const range = Math.max(1, ceil - floor);
+
+  const pts = numeric.map((v, idx) => {
+    const x = numeric.length === 1 ? width / 2 : 4 + (idx / (numeric.length - 1)) * (width - 8);
+    const norm = (v - floor) / range;
+    const y = height - norm * (height - 14) - 7;
     return [x, y];
   });
 
-  if (pts.length === 0) return { line: '', area: '' };
   if (pts.length === 1) {
     return {
       line: `M 0 ${pts[0][1]} L ${width} ${pts[0][1]}`,
       area: `M 0 ${pts[0][1]} L ${width} ${pts[0][1]} L ${width} ${height} L 0 ${height} Z`,
+      lastPt: pts[0],
     };
   }
 
@@ -236,44 +253,58 @@ function buildSmoothSvgPath(values, width = 260, height = 52) {
     line += ` C ${cx} ${y0.toFixed(1)}, ${cx} ${y1.toFixed(1)}, ${x1.toFixed(1)} ${y1.toFixed(1)}`;
   }
 
-  const area = `${line} L ${width} ${height} L 0 ${height} Z`;
-  return { line, area };
+  const area = `${line} L ${pts[pts.length - 1][0].toFixed(1)} ${height} L ${pts[0][0].toFixed(1)} ${height} Z`;
+  return { line, area, lastPt: pts[pts.length - 1] };
 }
 
 function SparklineChart({ id, values, tone = 'info' }) {
-  const { line, area } = useMemo(() => buildSmoothSvgPath(values, 260, 52), [values]);
+  const { line, area, lastPt } = useMemo(() => buildSmoothSvgPath(values, 260, 54), [values]);
   const strokeColor =
     tone === 'critical'
       ? '#f43f5e'
       : tone === 'high'
-        ? '#f59e0b'
-        : tone === 'low'
-          ? '#10b981'
-          : '#3b82f6';
+        ? '#f97316'
+        : tone === 'medium'
+          ? '#f59e0b'
+          : tone === 'low'
+            ? '#10b981'
+            : tone === 'violet'
+              ? '#a78bfa'
+              : '#38bdf8';
 
   const gradId = `spark-grad-${id.replace(/[^a-zA-Z0-9_-]/g, '')}`;
 
   return (
     <svg
       className="sparkline-svg"
-      viewBox="0 0 260 52"
+      viewBox="0 0 260 54"
       preserveAspectRatio="none"
       aria-hidden="true"
     >
       <defs>
         <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={strokeColor} stopOpacity="0.32" />
+          <stop offset="0%" stopColor={strokeColor} stopOpacity="0.34" />
           <stop offset="100%" stopColor={strokeColor} stopOpacity="0.02" />
         </linearGradient>
       </defs>
+      <line x1="0" y1="18" x2="260" y2="18" stroke="currentColor" strokeOpacity="0.08" strokeDasharray="3 3" />
+      <line x1="0" y1="36" x2="260" y2="36" stroke="currentColor" strokeOpacity="0.08" strokeDasharray="3 3" />
       <path d={area} fill={`url(#${gradId})`} />
       <path
         d={line}
         fill="none"
         stroke={strokeColor}
-        strokeWidth="2"
+        strokeWidth="2.2"
         strokeLinecap="round"
       />
+      {lastPt && (
+        <circle
+          cx={lastPt[0]}
+          cy={lastPt[1]}
+          r="3.2"
+          fill={strokeColor}
+        />
+      )}
     </svg>
   );
 }
@@ -1723,62 +1754,66 @@ export default function App() {
             <section className="kpi-grid-6" aria-label="Release overview metrics">
               <button
                 type="button"
-                className="kpi-card interactive"
+                className="kpi-card kpi-cyan interactive"
                 onClick={resetAppFilters}
                 title="Show all applications"
               >
                 <span className="kpi-label">Active Apps</span>
-                <span className="kpi-value">{kpis.totalApps}</span>
-                <span className="kpi-sub success">
+                <span className="kpi-value cyan">{kpis.totalApps}</span>
+                <span className="kpi-sub">
                   {applications.filter((a) => a.versionCount > 1).length} with history
                 </span>
               </button>
 
               <button
                 type="button"
-                className={`kpi-card interactive ${blockersOnly || statusFilter === 'Blocked' ? 'active-filter' : ''}`}
+                className={`kpi-card kpi-rose interactive ${blockersOnly || statusFilter === 'Blocked' ? 'active-filter' : ''}`}
                 onClick={() => setBlockersOnly((prev) => !prev)}
                 title="Filter to blocked releases"
               >
                 <span className="kpi-label">Blocked Releases</span>
-                <span className="kpi-value">{kpis.blockedReleases}</span>
+                <span className={`kpi-value ${kpis.blockedReleases > 0 ? 'rose' : 'emerald'}`}>
+                  {kpis.blockedReleases}
+                </span>
                 <span className={`kpi-sub ${kpis.blockedReleases > 0 ? 'danger' : 'success'}`}>
                   {kpis.blockedReleases > 0 ? 'P1 Critical gate fail' : 'All gates clear'}
                 </span>
               </button>
 
-              <article className="kpi-card">
+              <article className="kpi-card kpi-orange">
                 <span className="kpi-label">Critical Vulns</span>
-                <span className="kpi-value">{kpis.criticalVulnerabilities}</span>
+                <span className={`kpi-value ${kpis.criticalVulnerabilities > 0 ? 'orange' : 'emerald'}`}>
+                  {kpis.criticalVulnerabilities}
+                </span>
                 <span className={`kpi-sub ${kpis.criticalVulnerabilities > 0 ? 'danger' : 'success'}`}>
                   {fleetAnalytics.severityTotals.high} high · {fleetAnalytics.severityTotals.medium} med
                 </span>
               </article>
 
-              <article className="kpi-card">
+              <article className="kpi-card kpi-violet">
                 <span className="kpi-label">Test Pass Rate</span>
-                <span className="kpi-value">{fleetAnalytics.fleetPassRate}%</span>
+                <span className="kpi-value violet">{fleetAnalytics.fleetPassRate}%</span>
                 <span className={`kpi-sub ${kpis.failedTests > 0 ? 'warning' : 'success'}`}>
                   {kpis.failedTests} failed of {kpis.totalTests}
                 </span>
               </article>
 
-              <article className="kpi-card">
+              <article className="kpi-card kpi-emerald">
                 <span className="kpi-label">Fleet Readiness</span>
-                <span className="kpi-value">{fleetAnalytics.readinessIndex}%</span>
-                <span className="kpi-sub warning">
+                <span className="kpi-value emerald">{fleetAnalytics.readinessIndex}%</span>
+                <span className="kpi-sub">
                   {kpis.needsReviewReleases} need review · {kpis.readyReleases} ready
                 </span>
               </article>
 
               <button
                 type="button"
-                className="kpi-card interactive"
+                className="kpi-card kpi-amber interactive"
                 onClick={() => setActiveScreen('tasks')}
                 title="Open Tasks Board"
               >
                 <span className="kpi-label">Open Tasks</span>
-                <span className="kpi-value">{kpis.openTasks}</span>
+                <span className="kpi-value amber">{kpis.openTasks}</span>
                 <span className="kpi-sub">
                   {taskStats.testingOpen} Testing · {taskStats.deploymentOpen} Deploy
                 </span>
@@ -1844,7 +1879,7 @@ export default function App() {
                                 tabIndex={0}
                                 role="button"
                                 aria-pressed={isSelected}
-                                className={`app-bento-card ${isSelected ? 'selected' : ''}`}
+                                className={`app-bento-card tone-${app.priority.tone} ${isSelected ? 'selected' : ''}`}
                                 onClick={() =>
                                   setSelectedAppName((prev) =>
                                     prev === app.app ? null : app.app
@@ -1887,21 +1922,21 @@ export default function App() {
                                       {app.priority.shortLabel}
                                     </span>
                                   </div>
-                                  <div className="mini-tile">
+                                  <div className="mini-tile tile-rose">
                                     <span className="mini-tile-label">Crit / High</span>
                                     <span className="mini-tile-value">
                                       {app.vulnCounts.critical}C · {app.vulnCounts.high}H
                                     </span>
                                   </div>
-                                  <div className="mini-tile">
+                                  <div className="mini-tile tile-cyan">
                                     <span className="mini-tile-label">Selenium UI</span>
-                                    <span className="mini-tile-value">
+                                    <span className="mini-tile-value cyan">
                                       {sel ? `${sel.tests.passed}/${sel.tests.total}` : '—'}
                                     </span>
                                   </div>
-                                  <div className="mini-tile">
+                                  <div className="mini-tile tile-violet">
                                     <span className="mini-tile-label">E2E Tests</span>
-                                    <span className="mini-tile-value">
+                                    <span className="mini-tile-value violet">
                                       {e2e ? `${e2e.tests.passed}/${e2e.tests.total}` : '—'}
                                     </span>
                                   </div>
@@ -1942,11 +1977,11 @@ export default function App() {
                                     >
                                       Security {app.vulnCounts.total}
                                     </span>
-                                    <span className="badge-outline">
+                                    <span className="badge-outline cyan">
                                       Pass {app.passRate}%
                                     </span>
                                     {openForApp > 0 && (
-                                      <span className="badge-outline">
+                                      <span className="badge-outline violet">
                                         {openForApp} {openForApp === 1 ? 'task' : 'tasks'}
                                       </span>
                                     )}
@@ -1964,7 +1999,7 @@ export default function App() {
                         {pipelineFocusApp && (
                           <div className="bento-bottom-row">
                             {/* Left 1-col Card: Team Dispatch & Tasks */}
-                            <article className="app-bento-card" style={{ cursor: 'default' }}>
+                            <article className="app-bento-card tone-violet" style={{ cursor: 'default' }}>
                               <div className="bento-card-header">
                                 <div>
                                   <h2 className="bento-title">Team Dispatch &amp; Tasks</h2>
@@ -1972,25 +2007,25 @@ export default function App() {
                                     Testing &amp; Deployment Queue
                                   </p>
                                 </div>
-                                <span className="chip neutral">
+                                <span className="badge-outline violet">
                                   {taskStats.openCount} Open
                                 </span>
                               </div>
 
                               <div className="mini-tiles-grid">
-                                <div className="mini-tile">
+                                <div className="mini-tile tile-violet">
                                   <span className="mini-tile-label">Open Tasks</span>
-                                  <span className="mini-tile-value">{taskStats.openCount}</span>
+                                  <span className="mini-tile-value violet">{taskStats.openCount}</span>
                                 </div>
-                                <div className="mini-tile">
+                                <div className="mini-tile tile-cyan">
                                   <span className="mini-tile-label">Testing</span>
-                                  <span className="mini-tile-value">{taskStats.testingOpen}</span>
+                                  <span className="mini-tile-value cyan">{taskStats.testingOpen}</span>
                                 </div>
-                                <div className="mini-tile">
+                                <div className="mini-tile tile-amber">
                                   <span className="mini-tile-label">Deploy</span>
-                                  <span className="mini-tile-value">{taskStats.deploymentOpen}</span>
+                                  <span className="mini-tile-value amber">{taskStats.deploymentOpen}</span>
                                 </div>
-                                <div className="mini-tile">
+                                <div className="mini-tile tile-rose">
                                   <span className="mini-tile-label">P1 Urgent</span>
                                   <span
                                     className={`mini-tile-value ${
@@ -2000,7 +2035,7 @@ export default function App() {
                                     {taskStats.p1Open}
                                   </span>
                                 </div>
-                                <div className="mini-tile">
+                                <div className="mini-tile tile-emerald">
                                   <span className="mini-tile-label">Done</span>
                                   <span className="mini-tile-value low">{taskStats.doneCount}</span>
                                 </div>
@@ -2025,7 +2060,7 @@ export default function App() {
                                         ]
                                       : applications.map((a) => a.riskScore)
                                   }
-                                  tone="info"
+                                  tone="violet"
                                 />
                               </div>
 
@@ -2050,7 +2085,7 @@ export default function App() {
                             </article>
 
                             {/* Right 2-col Card: CI/CD Pipeline & Gate Readiness */}
-                            <article className="app-bento-card" style={{ cursor: 'default' }}>
+                            <article className="app-bento-card tone-cyan" style={{ cursor: 'default' }}>
                               <div className="bento-card-header">
                                 <div>
                                   <h2 className="bento-title">
